@@ -1,0 +1,8 @@
+# Local data dirs / build artifacts
+.venv/
+frontend/node_modules/
+frontend/dist/
+.shots/
+*.db
+__pycache__/
+.pytest_cache/

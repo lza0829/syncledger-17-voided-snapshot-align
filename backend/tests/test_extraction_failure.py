@@ -130,6 +130,98 @@ def test_reuse_refusal_attributed_to_originating_failure(fresh_db):
     assert evidence["refusal_count"] == 1
 
 
+def test_void_policy_voided_snapshot_rejected_even_paired_with_valid(fresh_db):
+    """A voided snapshot must not become legal by splicing with a later valid one."""
+    assert svc.list_settings()["extract_failure_policy"] == "void_batch"
+    bad = svc.run_reconcile(1, inject_side="right", inject_after=2)
+    good = svc.run_reconcile(1, note="later clean run")
+    assert good["status"] == "completed"
+
+    voided_left = bad["left_snapshot_id"]
+    valid_right = good["right_snapshot_id"]
+    statuses = {s["id"]: s["status"] for s in svc.list_snapshots(pair_id=1)}
+    assert statuses[voided_left] == "voided"
+    assert statuses[valid_right] == "valid"
+
+    diffs_before = len(svc.list_diffs(pair_id=1))
+    with pytest.raises(svc.AlignRefused) as exc:
+        svc.align_from_snapshots(1, voided_left, valid_right)
+    payload = exc.value.payload
+    assert payload["refused"] is True
+    assert payload["source"] == "snapshot_reuse"
+    assert payload["failure_id"] == bad["failure"]["id"]
+    assert payload["refusal_count"] == 1
+    # No new batch/diffs may be written by the refused alignment.
+    assert len(svc.list_diffs(pair_id=1)) == diffs_before
+    assert svc.failure_evidence(bad["failure"]["id"])["refusal_count"] == 1
+
+
+def test_freeze_policy_reuse_entry_refused_and_counted_while_failure_active(fresh_db):
+    """Snapshot-reuse entry must hit the same active-failure gate as a new run."""
+    svc.set_setting("extract_failure_policy", "freeze_success")
+    baseline = svc.run_reconcile(2, note="clean baseline")
+    valid_left, valid_right = baseline["left_snapshot_id"], baseline["right_snapshot_id"]
+    bad = svc.run_reconcile(2, inject_side="left", inject_after=1)
+    fid = bad["failure"]["id"]
+    assert bad["failure"]["status"] == "active"
+
+    diffs_before = len(svc.list_diffs(pair_id=2))
+    with pytest.raises(svc.AlignRefused) as exc:
+        svc.align_from_snapshots(2, valid_left, valid_right, note="sneaky reuse")
+    payload = exc.value.payload
+    assert payload["refused"] is True
+    assert payload["source"] == "active_failure_gate"
+    assert payload["failure_id"] == fid
+
+    # Every refused attempt — run entry and reuse entry — accumulates.
+    refusals = svc.list_refusals(pair_id=2)
+    assert [r["source"] for r in refusals if r["failure_id"] == fid]
+    assert all(r["failure_id"] == fid for r in refusals)
+    with pytest.raises(svc.AlignRefused):
+        svc.run_reconcile(2)
+    evidence = svc.failure_evidence(fid)
+    assert evidence["refusal_count"] == 3  # run-time refusal + reuse + second run
+    assert len(svc.list_diffs(pair_id=2)) == diffs_before
+
+
+def test_freeze_policy_reuse_allowed_only_after_clearing(fresh_db):
+    """No alignment (including snapshot reuse) before clearing; both clear paths reopen it."""
+    svc.set_setting("extract_failure_policy", "freeze_success")
+    baseline = svc.run_reconcile(2, note="clean baseline")
+    valid_left, valid_right = baseline["left_snapshot_id"], baseline["right_snapshot_id"]
+
+    bad = svc.run_reconcile(2, inject_side="right", inject_after=1)
+    fid = bad["failure"]["id"]
+    with pytest.raises(svc.AlignRefused):
+        svc.align_from_snapshots(2, valid_left, valid_right)
+
+    # Clear by discarding the frozen snapshot.
+    assert svc.discard_failure(fid)["status"] == "cleared"
+    reused = svc.align_from_snapshots(2, valid_left, valid_right, note="reuse after discard")
+    assert reused["status"] == "completed"
+    assert reused["diffs_written"] is True
+    assert svc.run_reconcile(2)["status"] == "completed"
+
+
+def test_freeze_policy_reuse_allowed_after_reextract_success(fresh_db):
+    """Successful re-extraction clears the failure and reopens every entry point."""
+    svc.set_setting("extract_failure_policy", "freeze_success")
+    baseline = svc.run_reconcile(2, note="clean baseline")
+    valid_left, valid_right = baseline["left_snapshot_id"], baseline["right_snapshot_id"]
+    bad = svc.run_reconcile(2, inject_side="left", inject_after=1)
+    fid = bad["failure"]["id"]
+
+    with pytest.raises(svc.AlignRefused):
+        svc.align_from_snapshots(2, valid_left, valid_right)
+    recovered = svc.recover_failure(fid)
+    assert recovered["cleared"] is True
+
+    # Historical valid snapshots are reusable again once the failure is cleared.
+    reused = svc.align_from_snapshots(2, valid_left, valid_right, note="reuse after recover")
+    assert reused["status"] == "completed"
+    assert reused["diffs_written"] is True
+
+
 def test_active_failure_gate_survives_policy_switch(fresh_db):
     svc.set_setting("extract_failure_policy", "freeze_success")
     first = svc.run_reconcile(2, inject_side="left", inject_after=1)

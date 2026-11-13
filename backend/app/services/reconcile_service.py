@@ -334,15 +334,10 @@ def _assert_snapshots_usable(
         snap = snapshots.get(side)
         if snap is not None and snap["status"] in allowed:
             continue
-        other = "right" if side == "left" else "left"
-        other_snap = snapshots.get(other)
-        if (
-            snap is not None
-            and snap["status"] == SNAPSHOT_VOIDED
-            and other_snap is not None
-            and other_snap["status"] in {SNAPSHOT_VALID, SNAPSHOT_FROZEN}
-        ):
-            continue
+        # Any snapshot outside the allowed set — voided, failed, discarded,
+        # frozen-without-permission, or missing — is rejected on its own
+        # merits. A voided snapshot must never become a legal alignment input
+        # merely because the opposite side happens to be valid/frozen.
         status = snap["status"] if snap else "missing"
         failure = (
             extract_repo.get_failure_for_snapshot(conn, snap["id"])
@@ -722,8 +717,11 @@ def align_from_snapshots(
         if not pair["enabled"]:
             raise ValueError("pair disabled")
 
-        if source != "snapshot_reuse":
-            _ensure_alignment_allowed(conn, pair)
+        # Every alignment entry point — run and snapshot reuse alike — is
+        # blocked while an extraction failure stays active. Reusing even fully
+        # valid historical snapshots is refused and counted until the failure
+        # is cleared (discard frozen snapshot or successful re-extraction).
+        _ensure_alignment_allowed(conn, pair)
         snapshots = {
             "left": extract_repo.get_snapshot(conn, left_snapshot_id, with_rows=True),
             "right": extract_repo.get_snapshot(conn, right_snapshot_id, with_rows=True),

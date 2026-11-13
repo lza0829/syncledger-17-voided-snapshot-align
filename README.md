@@ -49,6 +49,8 @@ Python 3.12 + FastAPI + SQLite；Vue 3 + Vite + Nginx。
   或 `POST .../recover` 重抽失败端（重抽仍失败则失败态保持 `active`，入口继续拒绝）。
 - 互证：`GET /api/extraction/failures/{id}/evidence` 返回失败原因、两端快照有效性、
   本批差异行数、拒绝对齐次数与逐项 `checks`；审计页/「抽取异常处置」页同步展示。
-- 复用快照对齐入口 `POST /api/reconcile/from-snapshots` 只接受 `valid`（或冻结清理时的 `frozen`）快照。
+- 复用快照对齐入口 `POST /api/reconcile/from-snapshots` 只接受 `valid`（或冻结清理时的 `frozen`）快照；
+  任一侧快照为 `voided`/`failed`/`discarded` 都直接拒绝并计数，即使对端是后来成功的合法快照也不例外。
+  冻结策略下存在 `active` 失败态时，该入口与开跑入口同走失败态闸门，一律拒绝并累计拒绝次数，清理后才放行。
 
 相关端点：`GET /api/extraction/failures|snapshots|refusals`、`PUT /api/settings`。测试：`pytest backend/tests`。
